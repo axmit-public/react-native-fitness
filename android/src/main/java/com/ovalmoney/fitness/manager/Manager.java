@@ -109,6 +109,8 @@ public class Manager implements ActivityEventListener {
                     fitnessOptions.addDataType(DataType.TYPE_HEART_RATE_BPM, currentRequest.permissionAccess);
                     break;
                 case SLEEP_ANALYSIS:
+                    fitnessOptions.addDataType(DataType.TYPE_SLEEP_SEGMENT, currentRequest.permissionAccess);                
+                    break;
                 default:
                     break;
             }

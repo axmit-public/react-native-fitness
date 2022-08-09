@@ -40,6 +40,7 @@ import com.google.android.gms.tasks.OnCanceledListener;
 import com.google.android.gms.tasks.Task;
 import com.ovalmoney.fitness.permission.Request;
 
+import java.util.TimeZone;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -396,43 +397,106 @@ public class Manager implements ActivityEventListener {
                 });
     }
 
+    // Comment reason - method for getting sleep data does not work
+
+    // @RequiresApi(api = Build.VERSION_CODES.N)
+    // public void getSleepAnalysis(Context context, double startDate, double endDate, final Promise promise) {
+    //     if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N){
+    //         promise.reject(String.valueOf(FitnessError.ERROR_METHOD_NOT_AVAILABLE), "Method not available");
+    //         return;
+    //     }
+
+    //     SessionReadRequest request = new SessionReadRequest.Builder()
+    //             .readSessionsFromAllApps()
+    //             .read(DataType.TYPE_ACTIVITY_SEGMENT)
+    //             .setTimeInterval((long) startDate, (long) endDate, TimeUnit.MILLISECONDS)
+    //             .build();
+
+    //     Fitness.getSessionsClient(context, GoogleSignIn.getLastSignedInAccount(context))
+    //             .readSession(request)
+    //             .addOnSuccessListener(new OnSuccessListener<SessionReadResponse>() {
+    //                 @Override
+    //                 public void onSuccess(SessionReadResponse response) {
+    //                     List<Object> sleepSessions = response.getSessions()
+    //                         .stream()
+    //                         .filter(new Predicate<Session>() {
+    //                             @Override
+    //                             public boolean test(Session s) {
+    //                                 return s.getActivity().equals(FitnessActivities.SLEEP);
+    //                             }
+    //                         })
+    //                         .collect(Collectors.toList());
+
+    //                     WritableArray sleep = Arguments.createArray();
+    //                     for (Object session : sleepSessions) {
+    //                         List<DataSet> dataSets = response.getDataSet((Session) session);
+    //                         for (DataSet dataSet : dataSets) {
+    //                             processSleep(dataSet, (Session) session, sleep);
+    //                         }
+    //                     }
+
+    //                     promise.resolve(sleep);
+    //                 }
+    //             })
+    //             .addOnFailureListener(new OnFailureListener() {
+    //                 @Override
+    //                 public void onFailure(@NonNull Exception e) {
+    //                     promise.reject(e);
+    //                 }
+    //             });
+    // }
+
+    // Copied from another package react-native-google-fit and reworked
+    // https://github.com/StasDoskalenko/react-native-google-fit
     @RequiresApi(api = Build.VERSION_CODES.N)
     public void getSleepAnalysis(Context context, double startDate, double endDate, final Promise promise) {
-        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.N){
-            promise.reject(String.valueOf(FitnessError.ERROR_METHOD_NOT_AVAILABLE), "Method not available");
-            return;
-        }
+        DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+        dateFormat.setTimeZone(TimeZone.getDefault());
 
         SessionReadRequest request = new SessionReadRequest.Builder()
                 .readSessionsFromAllApps()
-                .read(DataType.TYPE_ACTIVITY_SEGMENT)
+                .includeSleepSessions()
+                .read(DataType.TYPE_SLEEP_SEGMENT)
                 .setTimeInterval((long) startDate, (long) endDate, TimeUnit.MILLISECONDS)
                 .build();
 
-        Fitness.getSessionsClient(context, GoogleSignIn.getLastSignedInAccount(context))
+        // GoogleSignInOptionsExtension fitnessOptions =
+        //         FitnessOptions.builder()
+        //                 .addDataType(DataType.TYPE_SLEEP_SEGMENT, FitnessOptions.ACCESS_READ)
+        //                 .build();
+
+        final  GoogleSignInAccount gsa = GoogleSignIn.getLastSignedInAccount(context);
+
+        Fitness.getSessionsClient(context, gsa)
                 .readSession(request)
                 .addOnSuccessListener(new OnSuccessListener<SessionReadResponse>() {
                     @Override
                     public void onSuccess(SessionReadResponse response) {
-                        List<Object> sleepSessions = response.getSessions()
+                        List<Session> sleepSessions = response.getSessions()
                             .stream()
-                            .filter(new Predicate<Session>() {
-                                @Override
-                                public boolean test(Session s) {
-                                    return s.getActivity().equals(FitnessActivities.SLEEP);
-                                }
-                            })
+                            .filter(s -> s.getActivity().equals(FitnessActivities.SLEEP))
                             .collect(Collectors.toList());
 
-                        WritableArray sleep = Arguments.createArray();
-                        for (Object session : sleepSessions) {
-                            List<DataSet> dataSets = response.getDataSet((Session) session);
-                            for (DataSet dataSet : dataSets) {
-                                processSleep(dataSet, (Session) session, sleep);
-                            }
-                        }
+                        WritableArray sleepSample = Arguments.createArray();
 
-                        promise.resolve(sleep);
+                        for (Session session : sleepSessions) {
+                            WritableMap sleepData = Arguments.createMap();
+
+                            sleepData.putString("addedBy", session.getAppPackageName());
+                            sleepData.putString("startDate", dateFormat.format(session.getStartTime(TimeUnit.MILLISECONDS)));
+                            sleepData.putString("endDate", dateFormat.format(session.getEndTime(TimeUnit.MILLISECONDS)));
+
+                            // If the sleep session has finer granularity sub-components, extract them:
+                            List<DataSet> dataSets = response.getDataSet(session);
+                            WritableArray granularity = Arguments.createArray();
+                            for (DataSet dataSet : dataSets) {
+                                processDataSet(dataSet, granularity);
+                            }
+                            sleepData.putArray("granularity", granularity);
+
+                            sleepSample.pushMap(sleepData);
+                        }
+                        promise.resolve(sleepSample);
                     }
                 })
                 .addOnFailureListener(new OnFailureListener() {
@@ -441,6 +505,20 @@ public class Manager implements ActivityEventListener {
                         promise.reject(e);
                     }
                 });
+    }
+
+    private void processDataSet(DataSet dataSet, WritableArray granularity) {
+        DateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
+        dateFormat.setTimeZone(TimeZone.getDefault());
+        for (DataPoint dp : dataSet.getDataPoints()) {
+            WritableMap sleepStage = Arguments.createMap();
+
+            sleepStage.putInt("sleepStage", dp.getValue(Field.FIELD_SLEEP_SEGMENT_TYPE).asInt());
+            sleepStage.putString("startDate", dateFormat.format(dp.getStartTime(TimeUnit.MILLISECONDS)));
+            sleepStage.putString("endDate", dateFormat.format(dp.getEndTime(TimeUnit.MILLISECONDS)));
+
+            granularity.pushMap(sleepStage);
+        }
     }
 
     private void processStep(DataSet dataSet, WritableArray map) {
@@ -495,17 +573,17 @@ public class Manager implements ActivityEventListener {
         }
     }
 
-    private void processSleep(DataSet dataSet, Session session, WritableArray map) {
+    // private void processSleep(DataSet dataSet, Session session, WritableArray map) {
 
-        for (DataPoint dp : dataSet.getDataPoints()) {
-            for(Field field : dp.getDataType().getFields()) {
-                WritableMap sleepMap = Arguments.createMap();
-                sleepMap.putString("value", dp.getValue(field).asActivity());
-                sleepMap.putString("sourceId", session.getIdentifier());
-                sleepMap.putString("startDate", dateFormat.format(dp.getStartTime(TimeUnit.MILLISECONDS)));
-                sleepMap.putString("endDate", dateFormat.format(dp.getEndTime(TimeUnit.MILLISECONDS)));
-                map.pushMap(sleepMap);
-            }
-        }
-    }
+    //     for (DataPoint dp : dataSet.getDataPoints()) {
+    //         for(Field field : dp.getDataType().getFields()) {
+    //             WritableMap sleepMap = Arguments.createMap();
+    //             sleepMap.putString("value", dp.getValue(field).asActivity());
+    //             sleepMap.putString("sourceId", session.getIdentifier());
+    //             sleepMap.putString("startDate", dateFormat.format(dp.getStartTime(TimeUnit.MILLISECONDS)));
+    //             sleepMap.putString("endDate", dateFormat.format(dp.getEndTime(TimeUnit.MILLISECONDS)));
+    //             map.pushMap(sleepMap);
+    //         }
+    //     }
+    // }
 }
